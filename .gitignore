@@ -22,3 +22,4 @@ dist/
 junit-*
 pylint.log
 venv/
+.eggs

@@ -30,9 +30,12 @@ from netconf import NSMAP, qmap
 from netconf.base import NetconfSession
 from netconf.error import RPCError, SessionError, ReplyTimeoutError
 from netconf import util
+from queue import Queue
 
 logger = logging.getLogger(__name__)
 
+YP_PERIODIC = 1
+YP_ONCHANGE = 2
 
 def _is_filter(select):
     return select.lstrip().startswith("<")
@@ -87,6 +90,7 @@ class NetconfClientSession(NetconfSession):
         self.message_id = 0
         self.closing = False
         self.rpc_out = {}
+        self.notifications = Queue()
 
         # Condition to handle rpc_out queue
         self.cv = threading.Condition()
@@ -210,6 +214,55 @@ class NetconfClientSession(NetconfSession):
             self.rpc_out[msg_id] = None
 
         return msg_id
+
+    def get_notification(self, block=True, timeout=None):
+        return self.notifications.get(block, timeout)
+
+    def send_yp_establish_subscription(self, sub_type, datastore, **kwargs):
+        # Trying to respect RPC format the defined yang model in
+        # ietf-yang-push@2019-09-09.yang and ietf-subscribed-notifications@2019-09-09.yang
+        
+        # Establish subscription RPC needs a target. This can be either a stream or a 
+        # yang push datastore. In this case we asume we are working with a yang-push capable server.
+
+        if datastore is None:
+            raise ValueError("datastore can not be None. Expected identityref")
+
+        # The next mandatory parameter is a selection-filter. This can be a reference to a filter
+        # type (selection-filter-ref), a yp:datastore-subtree-filter or a yp:datastore-xpath-filter
+        #
+        # TODO: Check what is a filter-reference and a subtree-filter. Right now I will work only 
+        # with xpath-filter
+
+
+        # Validate type arguments
+        norm_type = sub_type.lower()
+        _type = None
+        if norm_type == 'periodic':
+            _type = YP_PERIODIC
+        elif norm_type == 'on-change':
+            _type = YP_ONCHANGE
+        else:
+            raise ValueError("Subscription type %s not supported. Use 'on-change' or 'periodic'")
+
+        if _type == YP_PERIODIC:
+            # If subscription is periodic
+            if 'period' not in kwargs:
+                raise ValueError("You have to specify the period for periodic subscriptions")
+            
+            period = float(kwargs['period'])
+            if period < 0:
+                raise ValueError("Period must me a positive number of centiseconds")
+
+        if _type == YP_ONCHANGE:
+            pass
+            # optional dampening-period 
+            # optional sync-on-start (send me a notification right after accepting the subscription)
+            # optional excluded-change (exclude one type of change) for instance if you don't want to
+            # receive notifications when an object is deleted, the value of this parameter would be "delete".
+            # Posible options are create, delete, insert, move and replace.
+            
+
 
     def send_rpc(self, rpc, timeout=None):
         """Send a generic RPC to the server and await the reply.
@@ -428,7 +481,9 @@ class NetconfClientSession(NetconfSession):
             raise SessionError(msg, "Invalid XML from server.")
 
         replies = tree.xpath("/nc:rpc-reply", namespaces=NSMAP)
-        if not replies:
+        tmp_NS = {'tmp':'urn:ietf:params:xml:ns:netconf:notification:1.0'}
+        notifications = tree.xpath("/tmp:notification", namespaces=tmp_NS)
+        if not replies and not notifications:
             raise SessionError(msg, "No rpc-reply found")
 
         for reply in replies:
@@ -469,6 +524,8 @@ class NetconfClientSession(NetconfSession):
                 finally:
                     self.cv.notify_all()
 
+        for notif in notifications:
+            self.notifications.put((tree, notif, msg))
 
 class NetconfSSHSession(NetconfClientSession):
     def __init__(self,
