@@ -90,7 +90,11 @@ class NetconfClientSession(NetconfSession):
         self.message_id = 0
         self.closing = False
         self.rpc_out = {}
-        self.notifications = Queue()
+        self.notification_queues_lock = threading.Lock()
+        self.notification_queues = {}
+        
+        self.tmp_notification_queues_lock = threading.Lock()
+        self.tmp_notification_queues = {}
 
         # Condition to handle rpc_out queue
         self.cv = threading.Condition()
@@ -215,14 +219,52 @@ class NetconfClientSession(NetconfSession):
 
         return msg_id
 
-    def get_notification(self, block=True, timeout=None):
-        return self.notifications.get(block, timeout)
+    def get_notification(self, subscription_id, block=True, timeout=None):
+        assert subscription_id in self.notification_queues
+        return self.notification_queues[subscription_id].get(block, timeout)
+
+    def _build_yp_establish_subscription_shell(self, datastore, datastore_subtree_filter, datastore_xpath_filter):
+        es_nsmap = {'yp': 'urn:ietf:params:xml:ns:yang:ietf-yang-push'}
+        root = etree.Element('establish-subscription', nsmap=es_nsmap,
+            attrib={'xmlns': 'urn:ietf:params:xml:ns:yang:ietf-subscribed-notifications'})
+
+        datastore_leaf = util.leaf_elm('yp:datastore', f'ds:{datastore}')
+        root.append(datastore_leaf)
+
+        if datastore_subtree_filter:
+            selection_filter = util.elm('yp:datastore-subtree-filter')
+            if isinstance(datastore_subtree_filter, etree.Element):
+                selection_filter.append(datastore_subtree_filter)
+            else:
+                selection_filter.text = datastore_subtree_filter
+        elif datastore_xpath_filter:
+            selection_filter = util.leaf_elm('yp:datastore-xpath-filter', datastore_xpath_filter)
+        else:
+            raise ValueError("Missing selection filter")
+
+        root.append(selection_filter)
+
+        return root
+
+    def _send_yp_establish_subscription_periodic(self, root, period, anchor_time=None):
+        periodic = util.subelm(root, 'yp:periodic')
+        period_leaf = util.leaf_elm("yp:period", period)
+        periodic.append(period_leaf)
+
+        if anchor_time:
+            anchor_time_leaf = util.leaf_elm("yp:anchor-time", anchor_time)
+            periodic.append(anchor_time_leaf)
+
+        return self.send_rpc(root)
+
+
+    def _send_yp_establish_subscription_on_change(self, request, dampening_period, sync_on_start):
+        raise NotImplementedError("On Change Not implemented")
 
     def send_yp_establish_subscription(self, sub_type, datastore, **kwargs):
         # Trying to respect RPC format the defined yang model in
         # ietf-yang-push@2019-09-09.yang and ietf-subscribed-notifications@2019-09-09.yang
-        
-        # Establish subscription RPC needs a target. This can be either a stream or a 
+        # Establish subscription RPC needs a target. This can be either a stream or a
         # yang push datastore. In this case we asume we are working with a yang-push capable server.
 
         if datastore is None:
@@ -231,9 +273,11 @@ class NetconfClientSession(NetconfSession):
         # The next mandatory parameter is a selection-filter. This can be a reference to a filter
         # type (selection-filter-ref), a yp:datastore-subtree-filter or a yp:datastore-xpath-filter
         #
-        # TODO: Check what is a filter-reference and a subtree-filter. Right now I will work only 
+        # TODO: Check what is a filter-reference and a subtree-filter. Right now I will work only
         # with xpath-filter
 
+        datastore_subtree_filter = kwargs.get('datastore_subtree_filter', None)
+        datastore_xpath_filter = kwargs.get('datastore_xpath_filter', None)
 
         # Validate type arguments
         norm_type = sub_type.lower()
@@ -249,19 +293,50 @@ class NetconfClientSession(NetconfSession):
             # If subscription is periodic
             if 'period' not in kwargs:
                 raise ValueError("You have to specify the period for periodic subscriptions")
-            
-            period = float(kwargs['period'])
+
+            period = int(kwargs['period'])
             if period < 0:
                 raise ValueError("Period must me a positive number of centiseconds")
 
+            anchor_time = kwargs.get('anchor_time', None)
+
         if _type == YP_ONCHANGE:
-            pass
-            # optional dampening-period 
+            # optional dampening-period
             # optional sync-on-start (send me a notification right after accepting the subscription)
-            # optional excluded-change (exclude one type of change) for instance if you don't want to
-            # receive notifications when an object is deleted, the value of this parameter would be "delete".
+            # optional excluded-change (exclude one type of change) for instance if you
+            # don't want to receive notifications when an object is deleted, the value
+            # of this parameter would be "delete".
             # Posible options are create, delete, insert, move and replace.
-            
+            dampening_period = kwargs.get('dampening_period', None)
+            if dampening_period:
+                dampening_period = int(dampening_period)
+                if dampening_period < 0:
+                    raise ValueError("Dampening-period must me a positive number of centiseconds")
+
+            sync_on_start = kwargs.get('sync_on_start', None)
+
+            if sync_on_start:
+                if not isinstance(sync_on_start, bool):
+                    raise TypeError("sync-on-start must be a boolean")
+        
+        request = self._build_yp_establish_subscription_shell(datastore, datastore_subtree_filter, datastore_xpath_filter)
+        if _type == YP_PERIODIC:
+            res = self._send_yp_establish_subscription_periodic(request, period, anchor_time=anchor_time)
+        else:
+            res = self._send_yp_establish_subscription_on_change(request, dampening_period, sync_on_start)
+
+
+        id_elm = res[1].xpath("/nc:rpc-reply/sn:id", namespaces=NSMAP)[0]
+
+        if id_elm is not None:
+            subscription_id = int(id_elm.text)
+
+            with self.notification_queues_lock:
+                self.notification_queues[subscription_id] = Queue()
+        
+            return subscription_id
+        
+        return res
 
 
     def send_rpc(self, rpc, timeout=None):
@@ -525,7 +600,17 @@ class NetconfClientSession(NetconfSession):
                     self.cv.notify_all()
 
         for notif in notifications:
-            self.notifications.put((tree, notif, msg))
+            push_update_node = notif.find("yp:push-update", namespaces=NSMAP)
+            id_node = push_update_node.find("tmp:id", namespaces=tmp_NS)
+            subscription_id = int(id_node.text)
+
+            with self.notification_queues_lock:
+                if subscription_id not in self.notification_queues:
+                    tmp_queue = self.tmp_notification_queues.get(subscription_id, Queue())
+                    tmp_queue.put(notif)
+                    self.tmp_notification_queues[subscription_id] = tmp_queue
+                else:
+                    self.notification_queues[subscription_id].put(notif)
 
 class NetconfSSHSession(NetconfClientSession):
     def __init__(self,
