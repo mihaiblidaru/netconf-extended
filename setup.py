@@ -1,22 +1,23 @@
-# -*- coding: utf-8 -*-#
-#
-# October 1 2015, Christian Hopps <chopps@gmail.com>
-#
-# Copyright (c) 2015, Deutsche Telekom AG
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from setuptools import setup
-
+from distutils.core import setup
 setup(
-    setup_requires=['pbr>=1.8'],
-    pbr=False)
+  name = 'netconf',         # How you named your package folder (MyLib)
+  packages = ['netconf'],   # Chose the same as "name"
+  version = '0.1',      # Start with a small number and increase it with every change you make
+  license='MIT',        # Chose a license from here: https://help.github.com/articles/licensing-a-repository
+  description = 'Simple IPC using tpc sockets and json for marshaling',   # Give a short description about your library
+  author = 'Mihai Blidaru',                   # Type in your name
+  author_email = 'mihaiblidaru14@gmail.com',      # Type in your E-Mail
+  url = 'https://github.com/user/reponame',   # Provide either the link to your github or to your website
+  download_url = 'https://github.com/user/reponame/archive/v_01.tar.gz',    # I explain this later on
+  keywords = ['SOME', 'MEANINGFULL', 'KEYWORDS'],   # Keywords that define your package best
+  classifiers=[
+    'Development Status :: 3 - Alpha',      # Chose either "3 - Alpha", "4 - Beta" or "5 - Production/Stable" as the current state of your package
+    'Intended Audience :: Developers',      # Define that your audience are developers
+    'Topic :: Software Development :: Build Tools',
+    'License :: OSI Approved :: MIT License',   # Again, pick a license
+    'Programming Language :: Python :: 3',      #Specify which pyhton versions that you want to support
+    'Programming Language :: Python :: 3.4',
+    'Programming Language :: Python :: 3.5',
+    'Programming Language :: Python :: 3.6',
+  ],
+)
